@@ -14,6 +14,7 @@ from .drive import (
     find_or_create_folder
 )
 from .document import Document
+from .markdown import MarkdownFormatter
 
 __version__ = "0.1.0"
 __author__ = "Vishnu Bashyam"
@@ -31,4 +32,5 @@ __all__ = [
     'move_file',
     'find_or_create_folder',
     'Document',
+    'MarkdownFormatter',
 ]

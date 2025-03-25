@@ -1,21 +1,148 @@
 class Document:
+    # Google Docs API bullet preset constants
+    BULLET_DISC_CIRCLE_SQUARE = "BULLET_DISC_CIRCLE_SQUARE"
+    BULLET_DIAMONDX_ARROW3D_SQUARE = "BULLET_DIAMONDX_ARROW3D_SQUARE"
+    BULLET_CHECKBOX = "BULLET_CHECKBOX"
+    BULLET_ARROW_DIAMOND_DISC = "BULLET_ARROW_DIAMOND_DISC"
+    BULLET_STAR_CIRCLE_SQUARE = "BULLET_STAR_CIRCLE_SQUARE"
+    BULLET_ARROW3D_CIRCLE_SQUARE = "BULLET_ARROW3D_CIRCLE_SQUARE"
+    BULLET_LEFTTRIANGLE_DIAMOND_DISC = "BULLET_LEFTTRIANGLE_DIAMOND_DISC"
+    BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE = "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE"
+    BULLET_DIAMOND_CIRCLE_SQUARE = "BULLET_DIAMOND_CIRCLE_SQUARE"
+    NUMBERED_DECIMAL_ALPHA_ROMAN = "NUMBERED_DECIMAL_ALPHA_ROMAN"
+    NUMBERED_DECIMAL_ALPHA_ROMAN_PARENS = "NUMBERED_DECIMAL_ALPHA_ROMAN_PARENS"
+    NUMBERED_DECIMAL_NESTED = "NUMBERED_DECIMAL_NESTED"
+    NUMBERED_UPPERALPHA_ALPHA_ROMAN = "NUMBERED_UPPERALPHA_ALPHA_ROMAN"
+    NUMBERED_UPPERROMAN_UPPERALPHA_DECIMAL = "NUMBERED_UPPERROMAN_UPPERALPHA_DECIMAL"
+    NUMBERED_ZERODECIMAL_ALPHA_ROMAN = "NUMBERED_ZERODECIMAL_ALPHA_ROMAN"
+    
     def __init__(self, docs_service, document_id):
         self.docs_service = docs_service
         self.document_id = document_id
+        self.last_index = None  # Track the last insertion point
 
-    def fetch(self):
-        """Fetch and return the document's full JSON structure."""
-        return self.docs_service.documents().get(
-            documentId=self.document_id
+    def fetch(self, include_tabs_content=True):
+        """
+        Fetch and return the document's full JSON structure.
+        
+        Args:
+            include_tabs_content: Whether to include content from all tabs in the response
+            
+        Returns:
+            dict: The document's JSON structure
+        """
+        doc = self.docs_service.documents().get(
+            documentId=self.document_id,
+            includeTabsContent=include_tabs_content
         ).execute()
+        
+        # Update last_index based on document content
+        if include_tabs_content and 'tabs' in doc and doc['tabs']:
+            tab = doc['tabs'][0]  # Get first tab
+            if 'documentTab' in tab and 'body' in tab['documentTab']:
+                body = tab['documentTab']['body']
+                if 'content' in body and body['content']:
+                    # Find the last element in the content array
+                    last_element = body['content'][-1]
+                    self.last_index = last_element.get('endIndex', 1)
+        
+        return doc
 
     def batch_update(self, requests):
-        """Execute a batchUpdate request on the document."""
+        """
+        Execute a batchUpdate request on the document.
+        
+        Args:
+            requests: List of request objects to execute
+            
+        Returns:
+            dict: The response from the API
+        """
         body = {'requests': requests}
-        return self.docs_service.documents().batchUpdate(
+        response = self.docs_service.documents().batchUpdate(
             documentId=self.document_id,
             body=body
         ).execute()
+        
+        # After a batch update, refresh document to update last_index
+        self.fetch()
+        
+        return response
+        
+    def get_end_index(self, tab_id=None):
+        """
+        Get the current end index of the document or specified tab.
+        If document hasn't been fetched yet, fetch it first.
+        
+        Args:
+            tab_id: Optional ID of the tab to get end index for
+            
+        Returns:
+            int: The end index position
+        """
+        if self.last_index is None:
+            self.fetch()
+            
+        # If still None after fetching, default to index 1
+        if self.last_index is None:
+            self.last_index = 1
+            
+        return self.last_index
+        
+    def append_text(self, tab_id, text, format_bold=False, format_italic=False, format_size=None, format_color=None):
+        """
+        Append text at the end of the document.
+        
+        Args:
+            tab_id: ID of the tab to insert into
+            text: Text to append
+            format_bold: Whether to format the text as bold
+            format_italic: Whether to format the text as italic
+            format_size: Point size for the text (optional)
+            format_color: Color for the text in RGB format (optional)
+            
+        Returns:
+            dict: Response from the API
+        """
+        # Get the current end index
+        end_index = self.get_end_index(tab_id)
+        
+        # Insert text at the end
+        return self.insert_text(
+            {'index': end_index - 1, 'tabId': tab_id},
+            text,
+            format_bold,
+            format_italic,
+            format_size,
+            format_color
+        )
+        
+    def insert_markdown(self, tab_id, index, markdown_text):
+        """
+        Insert text with markdown formatting at the specified location.
+        
+        Args:
+            tab_id: ID of the tab to insert into
+            index: Position in the document to insert the text
+            markdown_text: Text with markdown formatting to insert
+            
+        Returns:
+            dict: Response from the API
+        """
+        from .markdown import MarkdownFormatter
+        
+        formatter = MarkdownFormatter()
+        requests = formatter.convert_to_doc_requests(markdown_text, index)
+        
+        # Add tab ID to all requests that have a location or range
+        for request in requests:
+            for key in request:
+                if 'location' in request[key]:
+                    request[key]['location']['tabId'] = tab_id
+                if 'range' in request[key]:
+                    request[key]['range']['tabId'] = tab_id
+        
+        return self.batch_update(requests)
 
     def replace_text(self, placeholder, replacement, format_bold=False, format_italic=False, format_size=None, format_color=None):
         """
@@ -424,10 +551,17 @@ class Document:
         Returns:
             dict: Response from the API
         """
-        requests = []
+        # First fetch the document to get tab information
+        doc = self.fetch()
+        if 'tabs' not in doc or not doc['tabs']:
+            raise ValueError("Document has no tabs")
+            
+        tab_id = doc['tabs'][0]['tabProperties']['tabId']
+        
+        # We'll execute operations one at a time to ensure document state is always current
         
         # Set page size
-        requests.append({
+        self.batch_update([{
             'updateDocumentStyle': {
                 'documentStyle': {
                     'pageSize': {
@@ -443,33 +577,35 @@ class Document:
                 },
                 'fields': 'pageSize'
             }
-        })
+        }])
         
-        # Add title
-        doc = self.fetch()
-        content = doc.get('body', {}).get('content', [])
-        if content:
-            last_element = content[-1]
-            end_index = last_element.get('endIndex', 0)
-        else:
-            end_index = 1
-        
-        requests.append({
+        # Start with minimal content to ensure there's a paragraph
+        response = self.batch_update([{
             'insertText': {
                 'location': {
-                    'index': end_index - 1
+                    'index': 1,
+                    'tabId': tab_id
                 },
-                'text': title + '\n\n'
+                'text': '\n'
             }
-        })
+        }])
         
-        # Format title
-        title_end_index = end_index - 1 + len(title) + 2
-        requests.append({
+        # Add title
+        self.append_text(
+            tab_id, 
+            title + '\n\n',
+            format_bold=True
+        )
+        
+        # Apply title style at the document beginning
+        # Get the length of the title for proper styling
+        title_length = len(title)
+        self.batch_update([{
             'updateParagraphStyle': {
                 'range': {
-                    'startIndex': end_index - 1,
-                    'endIndex': title_end_index - 2  # Exclude the newlines
+                    'startIndex': 1,
+                    'endIndex': 1 + title_length,
+                    'tabId': tab_id
                 },
                 'paragraphStyle': {
                     'namedStyleType': 'TITLE',
@@ -477,26 +613,19 @@ class Document:
                 },
                 'fields': 'namedStyleType,alignment'
             }
-        })
+        }])
         
-        # Add problems
-        current_index = title_end_index - 1
+        # Add each problem one by one
         for i, problem in enumerate(problems, 1):
             problem_text = f"{i}. {problem}\n\n"
             
-            requests.append({
-                'insertText': {
-                    'location': {
-                        'index': current_index
-                    },
-                    'text': problem_text
-                }
-            })
+            # Append each problem to the end
+            self.append_text(tab_id, problem_text)
             
-            current_index += len(problem_text)
+        # Refresh document state
+        self.fetch()
         
-        # Execute all requests
-        return self.batch_update(requests)
+        return response
 
     def generate_answer_sheet(self, title, problems, answers):
         """
@@ -513,33 +642,41 @@ class Document:
         if len(problems) != len(answers):
             raise ValueError("Number of problems must match number of answers")
         
-        requests = []
-        
-        # Add title
+        # First fetch the document to get tab information
         doc = self.fetch()
-        content = doc.get('body', {}).get('content', [])
-        if content:
-            last_element = content[-1]
-            end_index = last_element.get('endIndex', 0)
-        else:
-            end_index = 1
+        if 'tabs' not in doc or not doc['tabs']:
+            raise ValueError("Document has no tabs")
+            
+        tab_id = doc['tabs'][0]['tabProperties']['tabId']
         
-        requests.append({
+        # We'll execute operations one by one to ensure document state is always current
+        
+        # Start with minimal content to ensure there's a paragraph
+        self.batch_update([{
             'insertText': {
                 'location': {
-                    'index': end_index - 1
+                    'index': 1,
+                    'tabId': tab_id
                 },
-                'text': title + '\n\n'
+                'text': '\n'
             }
-        })
+        }])
         
-        # Format title
-        title_end_index = end_index - 1 + len(title) + 2
-        requests.append({
+        # Add title
+        self.append_text(
+            tab_id, 
+            title + '\n\n',
+            format_bold=True
+        )
+        
+        # Apply title style
+        title_length = len(title)
+        self.batch_update([{
             'updateParagraphStyle': {
                 'range': {
-                    'startIndex': end_index - 1,
-                    'endIndex': title_end_index - 2  # Exclude the newlines
+                    'startIndex': 1,
+                    'endIndex': 1 + title_length,
+                    'tabId': tab_id
                 },
                 'paragraphStyle': {
                     'namedStyleType': 'TITLE',
@@ -547,75 +684,16 @@ class Document:
                 },
                 'fields': 'namedStyleType,alignment'
             }
-        })
+        }])
         
-        # Create a two-column table for problem numbers and answers
-        requests.append({
-            'insertTable': {
-                'location': {
-                    'index': title_end_index - 1
-                },
-                'rows': len(problems) + 1,  # +1 for the header row
-                'columns': 2
-            }
-        })
+        # Create formatted answer table using plain text for simplicity
+        self.append_text(tab_id, "Problem\tAnswer\n")
+        self.append_text(tab_id, "-------\t-------\n")
         
-        # We would need to get the document structure again to find the exact cell positions
-        # This is an approximation
-        table_start_index = title_end_index - 1
+        # Add each problem-answer pair as a row
+        for problem, answer in zip(problems, answers):
+            row_text = f"{problem}\t{answer}\n"
+            self.append_text(tab_id, row_text)
         
-        # Add headers
-        headers = ["Problem", "Answer"]
-        for i, header in enumerate(headers):
-            cell_index = table_start_index + (i * 2) + 2  # Approximate cell location
-            
-            requests.append({
-                'insertText': {
-                    'location': {
-                        'index': cell_index
-                    },
-                    'text': header
-                }
-            })
-            
-            # Make headers bold
-            requests.append({
-                'updateTextStyle': {
-                    'range': {
-                        'startIndex': cell_index,
-                        'endIndex': cell_index + len(header)
-                    },
-                    'textStyle': {
-                        'bold': True
-                    },
-                    'fields': 'bold'
-                }
-            })
-        
-        # Add problems and answers
-        # This is a simplification - in a real implementation, you'd need to determine the exact cell positions
-        row_offset = 20  # Approximate offset for each row
-        for i, (problem, answer) in enumerate(zip(problems, answers), 1):
-            problem_cell_index = table_start_index + 2 + (i * row_offset)
-            answer_cell_index = problem_cell_index + 10  # Approximate offset for second column
-            
-            requests.append({
-                'insertText': {
-                    'location': {
-                        'index': problem_cell_index
-                    },
-                    'text': str(problem)
-                }
-            })
-            
-            requests.append({
-                'insertText': {
-                    'location': {
-                        'index': answer_cell_index
-                    },
-                    'text': str(answer)
-                }
-            })
-        
-        # Execute all requests
-        return self.batch_update(requests)
+        # Refresh document state
+        return self.fetch()
