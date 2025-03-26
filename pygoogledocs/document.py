@@ -27,20 +27,24 @@ class Document:
         
         Args:
             include_tabs_content: Whether to include content from all tabs in the response
-                (Note: this parameter is kept for backward compatibility but is no longer used)
             
         Returns:
             dict: The document's JSON structure
         """
         doc = self.docs_service.documents().get(
-            documentId=self.document_id
+            documentId=self.document_id,
+            includeTabsContent=include_tabs_content
         ).execute()
         
         # Update last_index based on document content
-        content = doc.get('body', {}).get('content', [])
-        if content:
-            last_element = content[-1]
-            self.last_index = last_element.get('endIndex', 1)
+        if include_tabs_content and 'tabs' in doc and doc['tabs']:
+            tab = doc['tabs'][0]  # Get first tab
+            if 'documentTab' in tab and 'body' in tab['documentTab']:
+                body = tab['documentTab']['body']
+                if 'content' in body and body['content']:
+                    # Find the last element in the content array
+                    last_element = body['content'][-1]
+                    self.last_index = last_element.get('endIndex', 1)
         
         return doc
 
